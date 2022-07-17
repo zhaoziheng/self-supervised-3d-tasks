@@ -144,40 +144,50 @@ def preprocess_grid_2d(image):
 
 
 def preprocess_volume_3d(volume, crop_size, patches_per_side, patch_overlap, is_training=True):
+    # 这个函数处理一个3D数据（第一维不是bs
     result = []
     w, _, _, _ = volume.shape
 
     if is_training:
+        # 切出一个crop_size大小的数据，并以它为中心pad保持形状
         volume = crop_3d(volume, is_training, (crop_size, crop_size, crop_size))
         volume = pad_to_final_size_3d(volume, w)
 
     for patch in crop_patches_3d(volume, is_training, patches_per_side, -patch_overlap):
+    # crop_patches_3d把数据切分成patches_per_side^3个（互不重叠的）patch，对其中每一个：
         if is_training:
-            normal_patch_size = patch.shape[0]
-            patch_crop_size = int(normal_patch_size * (7.0 / 8.0))
-
+            # 随机加flip
             do_flip = np.random.choice([False, True])
             if do_flip:
                 patch = np.flip(patch, 0)
-
+            
+            # 随机crop出7/8尺寸的数据，并pad保持形状
+            normal_patch_size = patch.shape[0]
+            patch_crop_size = int(normal_patch_size * (7.0 / 8.0))
             patch = crop_3d(patch, is_training, (patch_crop_size, patch_crop_size, patch_crop_size))
             patch = pad_to_final_size_3d(patch, normal_patch_size)
 
         else:
             pass  # lets give it the most information we can get
 
-        result.append(patch)
+        result.append(patch)    # list of [patch_size, patch_size, patch_size, channel]
 
-    return np.asarray(result)
+    return np.asarray(result)   # [patch_num, patch_size, patch_size, patch_size, channel]
 
 
 def preprocess_3d(batch, crop_size, patches_per_side, is_training=True):
+    # 这个包装函数处理一个batch里的3D数据
     _, w, h, d, _ = batch.shape
     assert w == h and h == d, "accepting only cube volumes"
 
     patch_overlap = 0  # dont use overlap here
+    # 对patch中每个3D Image处理
+    # 每个Image返回一个list包含所有它切出的patch，应有patches_per_side^3个尺寸为volume.shape/patches_per_side的patch
+    # crop_size不决定patch数量和尺寸
     return np.stack([preprocess_volume_3d(volume, crop_size, patches_per_side, patch_overlap, is_training=is_training)
-                     for volume in batch])
+                     for volume in batch])  
+    # [batch_num, patch_num, patch_size, patch_size, patch_size, channel]
+
 
 
 def preprocess_grid_3d(image, skip_row=False):
@@ -189,6 +199,7 @@ def preprocess_grid_3d(image, skip_row=False):
     batch_size = shape[0]
     n_patches_one_dim = int(np.cbrt(shape[1]))
 
+    # 返回指定xyz坐标对应的那个patch
     def get_patch_at(batch, x, y, z, mirror=False):
         if batch < 0 or batch >= batch_size:
             return None
@@ -231,8 +242,8 @@ def preprocess_grid_3d(image, skip_row=False):
 
         return image[batch, x * n_patches_one_dim * n_patches_one_dim + y * n_patches_one_dim + z]
 
-    # this function will collect all the patches at one x-level that should be used in the terms
-    # in comparison to the x_start, we know how far we have to expand, forming a pyramid in 3D
+    # 递归函数，根据目标patch的xyz坐标，取得某一x层以及后面的x层中它需要的相关patch
+    # 对应论文中蓝色的patch，x层距离x_start远，patch取得越多，形成倒金字塔
     def get_patches_in_row(batch, x, x_start, y_start, z_start):
         y_min = y_start - (x_start - x)
         y_max = y_start + (x_start - x)
@@ -250,11 +261,15 @@ def preprocess_grid_3d(image, skip_row=False):
 
         return patches
 
+    # 取得目标patch和相关patch，对应论文中的橘色+蓝色patch集合
     def get_patches_for(batch, x, y, z):
+        # 目标patch
         me = get_patch_at(batch, x, y, z)
+        # 相关patch
         others = get_patches_in_row(batch, x - 1, x, y, z)
         return others + [me]
 
+    # 取得目标patch下方的positive example patch，对应论文中绿色的patch
     def get_following_patches(batch, x, y, z):
         me = get_patch_at(batch, x, y, z)
         if me is None:
@@ -269,14 +284,18 @@ def preprocess_grid_3d(image, skip_row=False):
     for batch_index in range(batch_size):
         for col_index in range(n_patches_one_dim):
             for depth_index in range(n_patches_one_dim):
-                # positive example
-                terms = get_patches_for(batch_index, end_patch_index, col_index, depth_index)
+                # 上下文信息    
+                # [n, patch_size, patch_size, patch_size, c]
+                terms = get_patches_for(batch_index, end_patch_index, col_index, depth_index)   
+                # positive example  
+                # [k, patch_size, patch_size, patch_size, c]
                 predict_terms = get_following_patches(batch_index, start_pred_patch_index, col_index, depth_index)
                 patches_enc.append(np.stack(terms))
                 patches_pred.append(np.stack(predict_terms))
                 labels.append(1)
 
-                # negative example
+                # negative example：与目标patch在同一depth层搜索其他的negative example  
+                # [k, patch_size, patch_size, patch_size, c]
                 r_batch = batch_index
                 r_col = col_index
                 r_dep = depth_index
@@ -287,8 +306,9 @@ def preprocess_grid_3d(image, skip_row=False):
                     r_dep = np.random.randint(n_patches_one_dim)
 
                 predict_terms = get_following_patches(r_batch, start_pred_patch_index, r_col, r_dep)
-                patches_enc.append(np.stack(terms))
-                patches_pred.append(np.stack(predict_terms))
-                labels.append(0)
+                patches_enc.append(np.stack(terms)) # [2*m, n, patch_size, patch_size, patch_size, c]
+                patches_pred.append(np.stack(predict_terms)) # [2*m, k, patch_size, patch_size, patch_size, c]
+                labels.append(0) # [2*m]
+                # m = batch_size * n_patches_one_dim * n_patches_one_dim
 
     return [np.stack(patches_enc), np.stack(patches_pred)], np.array(labels)

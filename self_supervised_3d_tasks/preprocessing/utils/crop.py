@@ -3,6 +3,8 @@ import albumentations as ab
 
 
 def crop_patches_3d(image, is_training, patches_per_side, patch_jitter=0):
+    # 这个函数把3D数据crop成patch，存成一个list
+    # patches_per_side定义了一共crop出几个patch
     h, w, d, _ = image.shape
 
     patch_overlap = -patch_jitter if patch_jitter < 0 else 0
@@ -78,6 +80,7 @@ def crop(image, is_training, crop_size):
 
 
 def crop_3d(image, is_training, crop_size):
+    # 从3d image中随机crop出[crop_size*crop_size*crop_size]
     h, w, d = crop_size[0], crop_size[1], crop_size[2]
     h_old, w_old, d_old = image.shape[0], image.shape[1], image.shape[2]
 

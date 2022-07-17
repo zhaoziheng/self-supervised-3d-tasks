@@ -68,16 +68,20 @@ class CPCBuilder(AlgorithmBuilderBase):
         if crop_size is None:
             crop_size = int(data_dim * 0.95)
 
-        self.crop_size = crop_size
-        self.patches_per_side = patches_per_side
-        self.code_size = code_size
+        self.crop_size = crop_size      # 默认crop掉5%的边缘数据，然后用0填充
+        self.patches_per_side = patches_per_side    # 每个volume切分成patches_per_side^3个patch
+        self.code_size = code_size      # hidden dim?
 
         # run a test to obtain data sizes
-        prep_train = self.get_training_preprocessing()[0]
+        prep_train = self.get_training_preprocessing()[0]   
+        # prep_train = preprocess_grid_3d(preprocess_3d(x, self.crop_size, self.patches_per_side))
         test_data = np.zeros((1, data_dim, data_dim, data_dim, number_channels), dtype=np.float32) if self.data_is_3D \
-            else np.zeros((1, data_dim, data_dim, number_channels), dtype=np.float32)
+            else np.zeros((1, data_dim, data_dim, number_channels), dtype=np.float32)   # 1, 384, 384, 384, 2
 
         test_x = prep_train(test_data, test_data)[0]
+        # [2*m, n, patch_size, patch_size, patch_size, c]  n是上文金字塔的patch数量
+        # [2*m, k, patch_size, patch_size, patch_size, c]  k是下文example的patch数量
+        # [2*m]
         self.terms = test_x[0].shape[1]
         self.image_size = test_x[0].shape[2]
         self.predict_terms = test_x[1].shape[1]
@@ -102,10 +106,12 @@ class CPCBuilder(AlgorithmBuilderBase):
             x_input = Input((self.terms, self.image_size, self.image_size, self.number_channels))
             y_input = Input((self.predict_terms, self.image_size, self.image_size, self.number_channels))
         model_with_embed_dim = Sequential([encoder_model, Flatten(), Dense(self.code_size)])
+        # 对每个patch过model_with_embed_dim网络，输出为[2*m, n, code_size]
         x_encoded = TimeDistributed(model_with_embed_dim)(x_input)
         context = network_autoregressive(x_encoded)
         preds = network_prediction(context, self.code_size, self.predict_terms)
 
+        # 对每个patch过model_with_embed_dim网络，输出为[2*m, k, code_size]
         y_encoded = TimeDistributed(model_with_embed_dim)(y_input)
         dot_product_probs = CPCLayer()([preds, y_encoded])
         cpc_model = keras.models.Model(inputs=[x_input, y_input], outputs=dot_product_probs)
